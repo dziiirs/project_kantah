@@ -1,19 +1,20 @@
 import hashlib
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 from PIL import Image
 
 Image.MAX_IMAGE_PIXELS = None  # peta resolusi tinggi melebihi batas default Pillow
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+DATA_DIR = Path(os.environ.get("DATA_DIR", "."))  # folder penyimpanan (disk permanen saat hosting)
+UPLOAD_DIR = DATA_DIR / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Database (SQLite) ---
-conn = sqlite3.connect("foto.db", check_same_thread=False)
+conn = sqlite3.connect(DATA_DIR / "foto.db", check_same_thread=False)
 conn.execute(
     """
     CREATE TABLE IF NOT EXISTS foto (
@@ -56,8 +57,22 @@ def simpan_foto(file, hash_file: str, pengunggah: str):
     conn.commit()
 
 
+def hapus_foto(nama_file: str):
+    conn.execute("DELETE FROM foto WHERE nama_file = ?", (nama_file,))
+    conn.commit()
+    path = UPLOAD_DIR / nama_file
+    if path.exists():
+        path.unlink()
+
+
 # --- Tampilan ---
 st.title("Cek Foto Peta")
+
+# Password opsional: aktif jika variabel lingkungan APP_PASSWORD diisi
+PASSWORD = os.environ.get("APP_PASSWORD")
+if PASSWORD and st.text_input("Password", type="password") != PASSWORD:
+    st.stop()
+
 st.caption("Unggah foto peta yang akan Anda kerjakan. Foto yang sudah diambil orang lain akan ditolak.")
 
 pengunggah = st.text_input("Nama Anda")
@@ -86,14 +101,41 @@ if st.button("Unggah", type="primary"):
                 img.thumbnail((1600, 1600))  # tampilkan versi kecil saja
                 st.image(img, caption=f.name, use_container_width=True)
 
-# --- Daftar foto yang sudah diambil ---
+# --- Daftar foto yang sudah diambil (dengan tombol hapus) ---
+PASSWORD_HAPUS = os.environ.get("PASSWORD_HAPUS") or PASSWORD
+
+
+@st.dialog("Hapus foto")
+def dialog_hapus(nama_file: str):
+    st.write(f"Hapus **{nama_file}**?")
+    pw = st.text_input("Masukkan password", type="password")
+    if st.button("Hapus", type="primary"):
+        if pw != PASSWORD_HAPUS:
+            st.error("Password salah.")
+        else:
+            hapus_foto(nama_file)
+            st.toast(f"{nama_file} dihapus.", icon="🗑️")
+            st.rerun()
+
+
 st.subheader("Foto yang sudah diambil")
-df = pd.read_sql_query(
-    "SELECT nama_file AS 'Nama File', pengunggah AS 'Pengunggah', waktu AS 'Waktu' "
-    "FROM foto ORDER BY id DESC",
-    conn,
-)
-if df.empty:
+rows = conn.execute(
+    "SELECT nama_file, pengunggah, waktu FROM foto ORDER BY id DESC"
+).fetchall()
+
+if not rows:
     st.info("Belum ada foto.")
 else:
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    if not PASSWORD_HAPUS:
+        st.caption("Tombol hapus nonaktif. Isi PASSWORD_HAPUS atau APP_PASSWORD untuk mengaktifkannya.")
+    kolom = [4, 2, 2, 1]
+    judul = st.columns(kolom)
+    for c, t in zip(judul, ["Nama File", "Pengunggah", "Waktu", ""]):
+        c.markdown(f"**{t}**")
+    for nama, peng, waktu in rows:
+        c1, c2, c3, c4 = st.columns(kolom)
+        c1.write(nama)
+        c2.write(peng)
+        c3.write(waktu)
+        if c4.button("🗑️", key=f"hapus_{nama}", disabled=not PASSWORD_HAPUS):
+            dialog_hapus(nama)
